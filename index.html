@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>EXE2IPS - Get IPS after using IPS2EXE</title>
+    <style>
+    html {
+      font-family: sans-serif;
+    }
+
+    .bu {
+      background-color: #B1C7EA;
+      padding: 5px 10px;
+      border-radius: 5px;
+      border: 1px ridge black;
+      font-size: 0.8rem;
+      height: auto;
+    }
+
+    .bu:hover {
+      background-color: #2D5BA3;
+      color: white;
+    }
+
+    .bu:active {
+      background-color: #0D3F8F;
+      color: white;
+    }
+
+    .bu:disabled {
+      background-color: #cacaca;
+      color: rgb(0, 0, 0);
+    }
+
+    #dropzone {
+      position: fixed;
+      left: 0px;
+      top: 0px;
+      z-index: 666;
+      width: 100%;
+      height: 100%;
+      background-color: rgb(0, 128, 192);
+      opacity: 0.5;
+      display: none;
+    }
+    </style>
+  </head>
+  <body>
+    <div style="margin: 8px;">
+      <h2>Get IPS</h2>
+    </div>
+
+    <div>
+      <div style="margin: 8px;">
+        <label for="file1" class="bu">Open EXE (any file with IPS)</label>
+        <input type="file" id="file1" onchange="onChangeEXE(event)" accept=".exe" style="width: 0px; opacity: 0;"><!-- delete space
+     --><span id="exename"></span>
+      </div>
+      <div style="margin: 8px;">
+        <button id="saveips" class="bu">Save IPS</button>
+
+        <div>Found: <span id="foundips">-</span></div>
+        <div>Target ROM: <span id="targetromname">-</span></div>
+      </div>
+    </div>
+
+    <div style="margin: 8px;">
+      <h2>Patch ROM</h2>
+    </div>
+
+    <div>
+      <div style="margin: 8px;">
+        <label for="file2" class="bu">Open ROM for patch</label>
+        <input type="file" id="file2" onchange="onChangeROM(event)"
+          accept=".nes, .unf, .unif, .gen, .bin, .md, .smd, .32x, .gb, .gbc, .sms, .gg, .sfc, .smc, .swc, .fig, .ufo, .bsx" style="width: 0px; opacity: 0;"><!-- delete space
+     --><span id="romname"></span>
+      </div>
+      <div style="margin: 8px;">
+        <button id="saverom" class="bu">Apply patch</button>
+
+        <div>
+          <input type="checkbox" id="fixmdchecksum">
+          <label for="fixmdchecksum">Fix Checksum (Mega Drive)</label>
+        </div>
+      </div>
+    </div>
+
+    <div id="dropzone"></div>
+
+    <script>
+'use strict';
+
+let exe = {
+  arr: new Uint8Array(),
+  range: [],
+  name: "",
+  isFound: false,
+};
+let rom = {
+  arr: new Uint8Array(),
+  name: "",
+  isLoaded: false,
+};
+
+function getIPSRange(arr) {
+  let search = boyerMoore([0x50, 0x41, 0x54, 0x43, 0x48]); // PATCH
+  let skip = search.byteLength;
+  let indexesPATCH = [];
+  for (let i = search(arr); i !== -1; i = search(arr, i + skip)) {
+    indexesPATCH.push(i);
+  }
+
+  search = boyerMoore([0x45, 0x4F, 0x46]); // EOF
+  skip = search.byteLength;
+  let indexesEOF = [];
+  for (let i = search(arr); i !== -1; i = search(arr, i + skip)) {
+    indexesEOF.push(i);
+  }
+
+  let arrIPS = [];
+  for (let p = 0; p < indexesPATCH.length; p++) {
+    for (let e = 0; e < indexesEOF.length; e++) {
+      let start = indexesPATCH[p];
+      let end = indexesEOF[e];
+      if (start > end) {
+        break;
+      }
+      let i = start + 5;
+      let prevOffset = -1;
+      let ok = true;
+      while (i < end) {
+        if (i + 6 > end) {
+          ok = false;
+          break;
+        }
+        let offset = (arr[i] << 16) + (arr[i + 1] << 8) + arr[i + 2];
+        i += 3;
+        let length = (arr[i] << 8) + arr[i + 1];
+        i += 2;
+        if (length === 0) { // RLE
+          length = 3;
+        }
+        i += length;
+        if ((i > end) || (prevOffset >= offset)) {
+          ok = false;
+          break;
+        }
+        prevOffset = offset;
+      }
+      if (i === end && ok) {
+        arrIPS.push([start, end + 3]);
+      }
+    }
+  }
+  return arrIPS;
+}
+
+function patchROM(arr, patch) {
+  let r = arr.slice();
+  let i = 5;
+  let end = patch.length - 3;
+  while (i < end) {
+    let offset = (patch[i] << 16) + (patch[i + 1] << 8) + patch[i + 2];
+    i += 3;
+    let length = (patch[i] << 8) + patch[i + 1];
+    i += 2;
+    if (length === 0) { // RLE
+      length = (patch[i] << 8) + patch[i + 1];
+      for (let off = 0; off < length; off++) {
+        r[offset + off] = patch[i + 2];
+      }
+      i += 3;
+    }
+    else {
+      for (let off = 0; off < length; off++) {
+        r[offset + off] = patch[i + off];
+      }
+      i += length;
+    }
+  }
+  return r;
+}
+
+function fixMegaDriveChecksum(arr) {
+  if (arr.length < 0x202 || arr.length > 0x400000 || arr.length % 2 != 0) {
+    return;
+  }
+  let real = 0;
+  for (let pos = 0x200; pos < arr.length; pos += 2) {
+    real += (arr[pos] << 8) + arr[pos + 1];
+    real &= 0xFFFF;
+  }
+  arr[0x18E] = (real & 0xFF00) >> 8;
+  arr[0x18F] = real & 0xFF;
+}
+
+const exeNameElement = document.getElementById("exename");
+const romNameElement = document.getElementById("romname");
+const targetRomNameElement = document.getElementById("targetromname");
+const foundIpsElement = document.getElementById("foundips");
+const fixMdChecksumElement = document.getElementById("fixmdchecksum");
+
+const saveIpsElement = document.getElementById("saveips");
+saveIpsElement.disabled = true;
+saveIpsElement.addEventListener("click", function () {
+  if (exe.isFound) {
+    let name = exe.name + ".ips";
+    let arrIPS = exe.arr.subarray(exe.range[0], exe.range[1]);
+    saveFile(name, arrIPS);
+  }
+});
+
+const saveRomElement = document.getElementById("saverom");
+saveRomElement.disabled = true;
+saveRomElement.addEventListener("click", function () {
+  if (exe.isFound && rom.isLoaded) {
+    let suffixIndex = rom.name.lastIndexOf(".");
+    let suffix = rom.name.slice(suffixIndex);
+    let name = rom.name.slice(0, suffixIndex) + " (patched)" + suffix;
+    let arrIPS = exe.arr.subarray(exe.range[0], exe.range[1]);
+    let arrPatchedROM = patchROM(rom.arr, arrIPS);
+    if (fixMdChecksumElement.checked) {
+      fixMegaDriveChecksum(arrPatchedROM);
+    }
+    saveFile(name, arrPatchedROM);
+  }
+});
+
+function onChangeEXE(event) {
+  handleFiles(event.target.files, 0);
+}
+function onChangeROM(event) {
+  handleFiles(event.target.files, 1);
+}
+function handleFiles(files, t) {
+  let file = files[0];
+  let reader = new FileReader();
+  reader.onload = function(event) {
+    if (t == 0) {
+      exe.arr = new Uint8Array(event.target.result);
+      exe.name = file.name;
+
+      exeNameElement.textContent = exe.name;
+      let found = getIPSRange(exe.arr);
+      foundIpsElement.textContent = found.length.toString();
+      exe.isFound = found.length === 1;
+      saveIpsElement.disabled = !exe.isFound;
+      if (exe.isFound) {
+        exe.range = found[0];
+        let start = exe.range[1];
+        let end = exe.arr.indexOf(0x00, start);
+        let targetname = "Unknown";
+        if (end - start < 256) {
+          targetname = new TextDecoder().decode(exe.arr.subarray(start, end));
+        }
+        targetRomNameElement.textContent = targetname;
+
+        saveRomElement.disabled = !rom.isLoaded;
+      }
+      else {
+        exe.range = [];
+        targetRomNameElement.textContent = "-";
+
+        saveRomElement.disabled = true;
+      }
+    }
+    else if (t == 1) {
+      rom.arr = new Uint8Array(event.target.result);
+      rom.name = file.name;
+
+      romNameElement.textContent = rom.name;
+      rom.isLoaded = true;
+
+      if (exe.isFound) {
+        saveRomElement.disabled = false;
+      }
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+const dropzone = document.getElementById("dropzone");
+window.addEventListener("dragover", dragover, false);
+dropzone.addEventListener("dragleave", dragleave, false);
+dropzone.addEventListener("drop", drop, false);
+function dragover(e) {
+  e.stopPropagation();
+  e.preventDefault();
+  if (e.target.id != "dropzone") {
+    dropzone.style.display = "block";
+  }
+}
+function dragleave(e) {
+  e.stopPropagation();
+  e.preventDefault();
+  if (e.target.id == "dropzone") {
+    dropzone.style.display = "none";
+  }
+}
+function drop(e) {
+  e.stopPropagation();
+  e.preventDefault();
+  dropzone.style.display = "none";
+  handleFiles(e.dataTransfer.files, 0);
+}
+
+function saveFile(fileName, arr) {
+  saveAs(new Blob([arr], {type: 'application/octet-stream'}), fileName);
+}
+// https://stackoverflow.com/q/23451726
+function saveAs(blob, fileName) {
+  let url = window.URL.createObjectURL(blob);
+  let anchorElem = document.createElement("a");
+  anchorElem.style = "display: none";
+  anchorElem.href = url;
+  anchorElem.download = fileName;
+  document.body.appendChild(anchorElem);
+  anchorElem.click();
+  document.body.removeChild(anchorElem);
+  // On Edge, revokeObjectURL should be called only after
+  // a.click() has completed, atleast on EdgeHTML 15.15048
+  setTimeout(function() {
+    window.URL.revokeObjectURL(url);
+  }, 1000);
+}
+
+// https://gist.github.com/etrepum/6235082
+function asUint8Array(input) {
+  if (input instanceof Uint8Array) {
+    return input;
+  } else if (typeof(input) === 'string') {
+    // This naive transform only supports ASCII patterns. UTF-8 support
+    // not necessary for the intended use case here.
+    var arr = new Uint8Array(input.length);
+    for (var i = 0; i < input.length; i++) {
+      var c = input.charCodeAt(i);
+      if (c > 127) {
+        throw new TypeError("Only ASCII patterns are supported");
+      }
+      arr[i] = c;
+    }
+    return arr;
+  } else {
+    // Assume that it's already something that can be coerced.
+    return new Uint8Array(input);
+  }
+}
+function boyerMoore(patternBuffer) {
+  // Implementation of Boyer-Moore substring search ported from page 772 of
+  // Algorithms Fourth Edition (Sedgewick, Wayne)
+  // http://algs4.cs.princeton.edu/53substring/BoyerMoore.java.html
+  /*
+  USAGE:
+     // needle should be ASCII string, ArrayBuffer, or Uint8Array
+     // haystack should be an ArrayBuffer or Uint8Array
+     var search = boyerMoore(needle);
+     var skip = search.byteLength;
+     var indexes = [];
+     for (var i = search(haystack); i !== -1; i = search(haystack, i + skip)) {
+       indexes.push(i);
+     }
+  */
+  var pattern = asUint8Array(patternBuffer);
+  var M = pattern.length;
+  if (M === 0) {
+    throw new TypeError("patternBuffer must be at least 1 byte long");
+  }
+  // radix
+  var R = 256;
+  var rightmost_positions = new Int32Array(R);
+  // position of the rightmost occurrence of the byte c in the pattern
+  for (var c = 0; c < R; c++) {
+    // -1 for bytes not in pattern
+    rightmost_positions[c] = -1;
+  }
+  for (var j = 0; j < M; j++) {
+    // rightmost position for bytes in pattern
+    rightmost_positions[pattern[j]] = j;
+  }
+  function boyerMooreSearch(txtBuffer, start, end) {
+    // Return offset of first match, -1 if no match.
+    var txt = asUint8Array(txtBuffer);
+    if (start === undefined) start = 0;
+    if (end === undefined) end = txt.length;
+    var pat = pattern;
+    var right = rightmost_positions;
+    var lastIndex = end - pat.length;
+    var lastPatIndex = pat.length - 1;
+    var skip;
+    for (var i = start; i <= lastIndex; i += skip) {
+      skip = 0;
+      for (var j = lastPatIndex; j >= 0; j--) {
+        var c = txt[i + j];
+        if (pat[j] !== c) {
+          skip = Math.max(1, j - right[c]);
+          break;
+        }
+      }
+      if (skip === 0) {
+        return i;
+      }
+    }
+    return -1;
+  };
+  boyerMooreSearch.byteLength = pattern.byteLength;
+  return boyerMooreSearch;
+}
+    </script>
+  </body>
+</html>
