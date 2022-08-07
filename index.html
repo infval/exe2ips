@@ -164,19 +164,23 @@ function patchROM(arr, patch) {
     i += 3;
     let length = (patch[i] << 8) + patch[i + 1];
     i += 2;
+    let src_arr = null;
     if (length === 0) { // RLE
       length = (patch[i] << 8) + patch[i + 1];
-      for (let off = 0; off < length; off++) {
-        r[offset + off] = patch[i + 2];
-      }
+      src_arr = new Uint8Array(length).fill(patch[i + 2]);
       i += 3;
     }
     else {
-      for (let off = 0; off < length; off++) {
-        r[offset + off] = patch[i + off];
-      }
+      src_arr = patch.slice(i, i + length);
       i += length;
     }
+    // Resize
+    if (r.length < offset + length) {
+      let r_new = new Uint8Array(offset + length);
+      r_new.set(r);
+      r = r_new;
+    }
+    r.set(src_arr, offset);
   }
   return r;
 }
